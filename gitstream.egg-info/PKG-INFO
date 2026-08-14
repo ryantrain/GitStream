@@ -32,6 +32,7 @@ GitStream is an engineering workflow intelligence platform that predicts pull-re
 ## MVP Scope
 
 - FastAPI backend for ingestion, predictions, and insights
+- Frontend web app served by FastAPI for repository estimate workflows
 - PostgreSQL schema with row-level security (RLS)
 - Feature engineering pipeline from pull-request events
 - Baseline ML predictor interface (ready for XGBoost/LightGBM)
@@ -73,6 +74,30 @@ GitStream is an engineering workflow intelligence platform that predicts pull-re
 6. Open docs:
 
    - http://127.0.0.1:8000/docs
+
+7. Open web app:
+
+    - http://127.0.0.1:8000/
+
+## GitHub PR History Estimate
+
+- UI flow:
+   - Visit http://127.0.0.1:8000/
+   - Enter repository owner and name
+   - Optional: add a GitHub token to avoid rate limits
+- API flow:
+
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/v1/estimates/github-history \
+      -H "Content-Type: application/json" \
+      -d '{
+         "owner": "ryantrain",
+         "repository": "yeah",
+         "lookback_prs": 200
+      }'
+   ```
+
+The estimator reads closed pull requests, filters merged ones, computes historical merge duration statistics (median, p75, p90), and returns a next-PR merge-hour estimate with a risk band.
 
 ## Next Build Steps
 

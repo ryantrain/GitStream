@@ -70,7 +70,7 @@ GitStream is an engineering workflow intelligence platform that predicts pull-re
       }'
    ```
 
-The estimator reads closed pull requests, filters merged ones, computes historical merge duration statistics (median, p75, p90), and returns a next-PR merge-hour estimate with a risk band.
+The estimator reads closed pull requests, filters merged ones, computes historical merge duration statistics (median, p75, p90), then lists every active pull request with estimated total and remaining merge hours based on those completed-history baselines.
 
 ## Next Build Steps
 

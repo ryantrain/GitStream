@@ -36,14 +36,10 @@
           </label>
 
           <label>
-            Lookback PR Count
+            Number of PRs to sample
             <input type="number" name="lookback_prs" min="20" max="1000" value="{{ lookback_prs }}" required />
           </label>
 
-          <label>
-            GitHub Token (optional)
-            <input type="password" name="github_token" placeholder="ghp_..." />
-          </label>
 
           <button type="submit">Run Estimate</button>
         </form>
@@ -58,28 +54,176 @@
         <h2>{{ result.owner }}/{{ result.repository }}</h2>
         <div class="grid">
           <article>
-            <h3>Next PR Estimate</h3>
-            <p class="big">{{ result.estimate_next_pr_hours }}h</p>
-            <p>Risk: <strong>{{ result.risk_band }}</strong></p>
+            <h3>Active Pull Requests <span class="tip" data-tooltip="Number of currently open PRs in this repository">?</span></h3>
+            <p class="big">{{ result.active_pr_count }}</p>
+            <p>Estimated from merged-history baseline</p>
           </article>
           <article>
-            <h3>Median Merge</h3>
+            <h3>Median Merge <span class="tip" data-tooltip="The middle value of all merged PR durations — half merged faster, half slower">?</span></h3>
             <p class="big">{{ result.median_merge_hours }}h</p>
             <p>Average: {{ result.average_merge_hours }}h</p>
           </article>
           <article>
-            <h3>Tail Latency</h3>
+            <h3>Tail Latency <span class="tip" data-tooltip="p75 = 75% of PRs merged within this time. p90 = 90% merged within this time. Higher values indicate long-running outliers.">?</span></h3>
             <p class="big">p75 {{ result.p75_merge_hours }}h</p>
             <p>p90 {{ result.p90_merge_hours }}h</p>
           </article>
           <article>
-            <h3>Sample Quality</h3>
+            <h3>Sample Quality <span class="tip" data-tooltip="How many merged PRs were found in the sample. More merged PRs = more reliable estimates.">?</span></h3>
             <p class="big">{{ result.merged_pr_count }}</p>
             <p>Merged PRs from {{ result.sample_window_pr_count }} sampled</p>
           </article>
         </div>
+
+        <div class="table-wrap">
+          <table id="pr-table">
+            <colgroup>
+              <col style="width: 18%;" /><!-- PR -->
+              <col style="width: 10%;" /><!-- Author -->
+              <col style="width: 9%;" /><!-- Age -->
+              <col style="width: 14%;" /><!-- Change Size -->
+              <col style="width: 8%;" /><!-- Files -->
+              <col style="width: 10%;" /><!-- Reviewers -->
+              <col style="width: 17%;" /><!-- Est. Review & Merge -->
+              <col style="width: 14%;" /><!-- Risk -->
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="sortable" data-col="0" data-type="num"><span class="sort-label">PR</span> <span class="tip" data-tooltip="Pull request number and title">?</span></th>
+                <th>Author <span class="tip" data-tooltip="GitHub username who opened the PR">?</span></th>
+                <th class="sortable" data-col="2" data-type="num"><span class="sort-label">Age (h)</span> <span class="tip" data-tooltip="Hours since the PR was opened">?</span></th>
+                <th class="sortable" data-col="3" data-type="num"><span class="sort-label">Change Size</span> <span class="tip" data-tooltip="Lines added / lines deleted in this PR">?</span></th>
+                <th class="sortable" data-col="4" data-type="num"><span class="sort-label">Files</span> <span class="tip" data-tooltip="Number of files modified in this PR">?</span></th>
+                <th class="sortable" data-col="5" data-type="num"><span class="sort-label">Reviewers</span> <span class="tip" data-tooltip="Number of reviewers currently requested">?</span></th>
+                <th class="sortable" data-col="6" data-type="num"><span class="sort-label">Review Effort (h)</span> <span class="tip" data-tooltip="Estimated hours of active reviewer time to read the diff, understand the changes, and merge. Based on lines added/deleted, file count, and cognitive load research.">?</span></th>
+                <th class="sortable" data-col="7" data-type="risk"><span class="sort-label">Risk</span> <span class="tip" data-tooltip="Effort band: low (&lt;1h quick review), medium (1–4h substantial), high (&gt;4h major effort)">?</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for pr in result.active_pull_requests %}
+              <tr>
+                <td data-sort="{{ pr.number }}">
+                  <a href="{{ pr.html_url }}" target="_blank" rel="noreferrer">#{{ pr.number }}</a>
+                  <div class="pr-title">{{ pr.title }}</div>
+                </td>
+                <td>{{ pr.author }}</td>
+                <td>{{ pr.age_hours }}</td>
+                <td>+{{ pr.additions }} / -{{ pr.deletions }}</td>
+                <td>{{ pr.changed_files }}</td>
+                <td>{{ pr.requested_reviewers }}</td>
+                <td>{{ pr.review_effort_hours }}</td>
+                <td><span class="risk {{ pr.risk_band }}">{{ pr.risk_band }}</span></td>
+              </tr>
+              {% else %}
+              <tr>
+                <td colspan="8">No active pull requests found for this repository.</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
       </section>
       {% endif %}
     </main>
+
+    <div class="floating-tooltip" id="floating-tooltip"></div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        // --- Floating tooltip ---
+        var tooltip = document.getElementById("floating-tooltip");
+        var tips = document.querySelectorAll(".tip");
+
+        tips.forEach(function (el) {
+          el.addEventListener("mouseenter", function (e) {
+            var text = el.getAttribute("data-tooltip");
+            if (!text) return;
+            tooltip.textContent = text;
+            tooltip.classList.add("visible");
+
+            var rect = el.getBoundingClientRect();
+            var tipRect = tooltip.getBoundingClientRect();
+            var top = rect.top - tipRect.height - 8;
+            var left = rect.left + rect.width / 2 - tipRect.width / 2;
+
+            // If it would clip above the viewport, show below instead
+            if (top < 4) {
+              top = rect.bottom + 8;
+            }
+            // Keep within horizontal bounds
+            if (left < 4) left = 4;
+            if (left + tipRect.width > window.innerWidth - 4) {
+              left = window.innerWidth - tipRect.width - 4;
+            }
+
+            tooltip.style.top = top + "px";
+            tooltip.style.left = left + "px";
+          });
+
+          el.addEventListener("mouseleave", function () {
+            tooltip.classList.remove("visible");
+          });
+        });
+
+        // --- Table sorting ---
+        var table = document.getElementById("pr-table");
+        if (!table) return;
+
+        var headers = table.querySelectorAll("th.sortable");
+        var tbody = table.querySelector("tbody");
+
+        var riskOrder = { low: 0, medium: 1, high: 2 };
+
+        function parseNum(text) {
+          var n = parseFloat(text.replace(/[^0-9.\-]/g, ""));
+          return isNaN(n) ? 0 : n;
+        }
+
+        function sortTable(colIdx, type, dir) {
+          var rows = Array.from(tbody.querySelectorAll("tr"));
+          rows.sort(function (a, b) {
+            var aCell = a.cells[colIdx];
+            var bCell = b.cells[colIdx];
+            if (!aCell || !bCell) return 0;
+
+            var aVal = aCell.getAttribute("data-sort");
+            var bVal = bCell.getAttribute("data-sort");
+            var aText = aVal || aCell.textContent.trim();
+            var bText = bVal || bCell.textContent.trim();
+            var cmp = 0;
+
+            if (type === "risk") {
+              cmp = (riskOrder[aText] || 0) - (riskOrder[bText] || 0);
+            } else {
+              cmp = parseNum(aText) - parseNum(bText);
+            }
+
+            return dir === "asc" ? cmp : -cmp;
+          });
+
+          rows.forEach(function (row) {
+            tbody.appendChild(row);
+          });
+        }
+
+        headers.forEach(function (th) {
+          var label = th.querySelector(".sort-label");
+          if (!label) return;
+
+          label.addEventListener("click", function () {
+            var col = parseInt(th.dataset.col);
+            var type = th.dataset.type;
+            var currentDir = th.classList.contains("asc") ? "asc" : th.classList.contains("desc") ? "desc" : null;
+            var newDir = currentDir === "asc" ? "desc" : "asc";
+
+            headers.forEach(function (h) {
+              h.classList.remove("asc", "desc");
+            });
+            th.classList.add(newDir);
+            sortTable(col, type, newDir);
+          });
+        });
+      });
+    </script>
   </body>
 </html>

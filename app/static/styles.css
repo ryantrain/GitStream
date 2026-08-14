@@ -24,7 +24,7 @@ body {
 }
 
 .shell {
-  max-width: 980px;
+  max-width: 1160px;
   margin: 0 auto;
   padding: 2rem 1rem 4rem;
   animation: rise 400ms ease-out;
@@ -134,6 +134,149 @@ button:hover {
   margin: 0.2rem 0;
   font-size: 1.9rem;
   font-weight: 700;
+}
+
+.tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--line);
+  border-radius: 50%;
+  cursor: help;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+.floating-tooltip {
+  position: fixed;
+  background: var(--ink);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  width: max-content;
+  max-width: 220px;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 9999;
+}
+
+.floating-tooltip.visible {
+  opacity: 1;
+}
+
+.table-wrap {
+  margin-top: 1rem;
+  overflow-x: hidden;
+  overflow-y: visible;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.82rem;
+}
+
+thead {
+  background: #f2ebde;
+}
+
+thead tr:first-child th:first-child {
+  border-top-left-radius: 12px;
+}
+
+thead tr:first-child th:last-child {
+  border-top-right-radius: 12px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.4rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  white-space: normal;
+  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+th.sortable {
+  user-select: none;
+}
+
+.sort-label {
+  cursor: pointer;
+}
+
+.sort-label:hover {
+  color: var(--accent);
+}
+
+.sort-label::before {
+  content: "⇅ ";
+  font-size: 0.7rem;
+  opacity: 0.4;
+}
+
+th.sortable.asc .sort-label::before {
+  content: "↑ ";
+  opacity: 1;
+}
+
+th.sortable.desc .sort-label::before {
+  content: "↓ ";
+  opacity: 1;
+}
+
+tbody tr:nth-child(even) {
+  background: #fff8ec;
+}
+
+.pr-title {
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.risk {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.risk.low {
+  background: #e3f3ef;
+  color: #0f554e;
+}
+
+.risk.medium {
+  background: #fff0d5;
+  color: #7f5a00;
+}
+
+.risk.high {
+  background: #ffe1d9;
+  color: #8a321d;
 }
 
 @keyframes rise {

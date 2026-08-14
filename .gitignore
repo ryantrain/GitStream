@@ -17,3 +17,5 @@ htmlcov/
 *.sqlite3
 *.db
 .vscode/
+.kiro/
+.github/
