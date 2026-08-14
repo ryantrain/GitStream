@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gitstream"
+version = "0.1.0"
+description = "Engineering workflow intelligence platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.6.1",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2.3",
+  "numpy>=2.1.0",
+  "pandas>=2.2.3",
+  "scikit-learn>=1.6.1",
+  "lightgbm>=4.5.0",
+  "xgboost>=2.1.2",
+  "python-dotenv>=1.0.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.3",
+  "httpx>=0.28.1",
+  "ruff>=0.9.0",
+  "mypy>=1.14.1"
+]
+
+[tool.setuptools]
+packages = ["app"]

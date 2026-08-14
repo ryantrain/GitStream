@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gitstream-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gitstream
+      POSTGRES_PASSWORD: gitstream
+      POSTGRES_DB: gitstream
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
