@@ -132,3 +132,81 @@ def estimate_from_pr_history(prs: list[dict[str, Any]]) -> dict[str, float | int
         "estimate_next_pr_hours": round(estimate_next, 2),
         "risk_band": _risk_band(estimate_next),
     }
+
+
+def fetch_active_prs(
+    owner: str,
+    repository: str,
+    github_token: str | None = None,
+) -> list[dict[str, Any]]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    response = requests.get(
+        f"{GITHUB_API_URL}/repos/{quote(owner)}/{quote(repository)}/pulls",
+        params={"state": "open", "sort": "updated", "direction": "desc", "per_page": 100},
+        headers=headers,
+        timeout=20,
+    )
+
+    if response.status_code == 404:
+        raise GithubHistoryError("Repository not found.")
+    if response.status_code == 403:
+        raise GithubHistoryError("GitHub API rate limit hit. Add a token and retry.")
+    if response.status_code >= 400:
+        raise GithubHistoryError(f"GitHub API returned status {response.status_code}.")
+
+    prs = response.json()
+    if not isinstance(prs, list):
+        return []
+    return prs
+
+
+def build_active_pr_prediction_rows(
+    prs: list[dict[str, Any]],
+    baseline_hours: float = 24.0,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+
+    for pr in prs:
+        additions = int(pr.get("additions") or 0)
+        deletions = int(pr.get("deletions") or 0)
+        changed_files = int(pr.get("changed_files") or 0)
+        requested_reviewers = pr.get("requested_reviewers") or []
+        requested_teams = pr.get("requested_teams") or []
+        requested_reviewers_count = len(requested_reviewers) + len(requested_teams)
+        author = (pr.get("user") or {}).get("login") or "unknown"
+        title = pr.get("title") or "Untitled PR"
+
+        complexity_weight = 0.08 * additions + 0.06 * deletions + 0.9 * changed_files
+        reviewer_weight = 1.4 * requested_reviewers_count
+        predicted_hours = max(baseline_hours + complexity_weight + reviewer_weight, 2.0)
+
+        if predicted_hours < 12:
+            risk_band = "low"
+        elif predicted_hours < 36:
+            risk_band = "medium"
+        else:
+            risk_band = "high"
+
+        rows.append(
+            {
+                "number": int(pr.get("number") or 0),
+                "title": title,
+                "author": author,
+                "additions": additions,
+                "deletions": deletions,
+                "changed_files": changed_files,
+                "requested_reviewers_count": requested_reviewers_count,
+                "predicted_merge_hours": round(predicted_hours, 2),
+                "risk_band": risk_band,
+                "url": pr.get("html_url") or "",
+                "draft": bool(pr.get("draft")),
+            }
+        )
+
+    return rows
