@@ -16,3 +16,4 @@ htmlcov/
 .env
 *.sqlite3
 *.db
+.vscode/

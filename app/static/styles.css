@@ -1,0 +1,159 @@
+:root {
+  --bg: #f7f3ea;
+  --ink: #1b1a18;
+  --muted: #5c5850;
+  --card: #fffcf4;
+  --accent: #e45d3a;
+  --accent-2: #126e66;
+  --line: #dfd7c8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 90% -10%, #ffe7c6 0%, transparent 40%),
+    radial-gradient(circle at -10% 40%, #d8f4ef 0%, transparent 35%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+.shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+  animation: rise 400ms ease-out;
+}
+
+.hero h1 {
+  margin: 0.5rem 0;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--accent-2);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.8rem;
+}
+
+.subtitle {
+  margin-top: 0;
+  max-width: 70ch;
+  color: var(--muted);
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 1.2rem;
+  margin-top: 1rem;
+  box-shadow: 0 8px 30px rgb(24 20 14 / 8%);
+}
+
+.estimate-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+label {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.7rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.9rem;
+  background: #fff;
+}
+
+button {
+  grid-column: 1 / -1;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.8rem 1rem;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  color: #fff;
+  background: linear-gradient(95deg, var(--accent), #f38d4f);
+  transition: transform 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+.alert {
+  border-color: #f3ae99;
+  background: #fff2ee;
+  color: #8a321d;
+}
+
+.metrics h2 {
+  margin: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+}
+
+.grid article {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 0.9rem;
+}
+
+.grid h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.big {
+  margin: 0.2rem 0;
+  font-size: 1.9rem;
+  font-weight: 700;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 780px) {
+  .estimate-form,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .shell {
+    padding-top: 1.5rem;
+  }
+}

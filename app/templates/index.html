@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GitStream | Workflow Forecast</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Engineering Workflow Intelligence</p>
+        <h1>Predict Pull Request Merge Delay Before It Happens</h1>
+        <p class="subtitle">
+          Connect a GitHub repository and estimate next merge time from actual PR history.
+          Built for delivery planning, not guesswork.
+        </p>
+      </section>
+
+      <section class="panel">
+        <form action="/estimate" method="post" class="estimate-form">
+          <label>
+            GitHub Owner
+            <input type="text" name="owner" value="{{ owner }}" placeholder="ryantrain" required />
+          </label>
+
+          <label>
+            Repository
+            <input type="text" name="repository" value="{{ repository }}" placeholder="yeah" required />
+          </label>
+
+          <label>
+            Lookback PR Count
+            <input type="number" name="lookback_prs" min="20" max="1000" value="{{ lookback_prs }}" required />
+          </label>
+
+          <label>
+            GitHub Token (optional)
+            <input type="password" name="github_token" placeholder="ghp_..." />
+          </label>
+
+          <button type="submit">Run Estimate</button>
+        </form>
+      </section>
+
+      {% if error %}
+      <section class="panel alert">{{ error }}</section>
+      {% endif %}
+
+      {% if result %}
+      <section class="panel metrics">
+        <h2>{{ result.owner }}/{{ result.repository }}</h2>
+        <div class="grid">
+          <article>
+            <h3>Next PR Estimate</h3>
+            <p class="big">{{ result.estimate_next_pr_hours }}h</p>
+            <p>Risk: <strong>{{ result.risk_band }}</strong></p>
+          </article>
+          <article>
+            <h3>Median Merge</h3>
+            <p class="big">{{ result.median_merge_hours }}h</p>
+            <p>Average: {{ result.average_merge_hours }}h</p>
+          </article>
+          <article>
+            <h3>Tail Latency</h3>
+            <p class="big">p75 {{ result.p75_merge_hours }}h</p>
+            <p>p90 {{ result.p90_merge_hours }}h</p>
+          </article>
+          <article>
+            <h3>Sample Quality</h3>
+            <p class="big">{{ result.merged_pr_count }}</p>
+            <p>Merged PRs from {{ result.sample_window_pr_count }} sampled</p>
+          </article>
+        </div>
+      </section>
+      {% endif %}
+    </main>
+  </body>
+</html>
