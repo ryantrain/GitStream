@@ -1,3 +1,18 @@
+{#
+  Tooltip helper. Renders a real <button> so the explanation is reachable by
+  keyboard and exposed to assistive tech through the accessible name. The
+  floating visual tooltip is decorative only (aria-hidden), which keeps the
+  screen-reader experience independent of the hover behaviour.
+#}
+{% macro tip(text) -%}
+<button type="button" class="tip" data-tooltip="{{ text }}" aria-label="Help: {{ text }}">
+  <span aria-hidden="true">?</span>
+</button>
+{%- endmacro %}
+
+{% macro band(value) -%}
+<span class="risk {{ value }}">{{ value }}</span>
+{%- endmacro %}
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -13,216 +28,722 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="shell">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <main class="shell" id="main">
       <section class="hero">
         <p class="eyebrow">Engineering Workflow Intelligence</p>
         <h1>Predict Pull Request Merge Delay Before It Happens</h1>
         <p class="subtitle">
-          Connect a GitHub repository and estimate next merge time from actual PR history.
+          Connect a GitHub repository and forecast merge time from its actual PR history.
           Built for delivery planning, not guesswork.
         </p>
       </section>
 
       <section class="panel">
-        <form action="/estimate" method="post" class="estimate-form">
+        <form action="/estimate" method="post" class="estimate-form" id="estimate-form">
           <label>
             GitHub Owner
-            <input type="text" name="owner" value="{{ owner }}" placeholder="ryantrain" required />
+            <input
+              type="text"
+              name="owner"
+              value="{{ owner }}"
+              placeholder="ryantrain"
+              autocomplete="organization"
+              required
+            />
           </label>
 
           <label>
             Repository
-            <input type="text" name="repository" value="{{ repository }}" placeholder="yeah" required />
+            <input
+              type="text"
+              name="repository"
+              value="{{ repository }}"
+              placeholder="yeah"
+              autocomplete="off"
+              required
+            />
           </label>
 
           <label>
             Number of PRs to sample
-            <input type="number" name="lookback_prs" min="20" max="1000" value="{{ lookback_prs }}" required />
+            <input
+              type="number"
+              name="lookback_prs"
+              min="{{ min_lookback_prs }}"
+              max="{{ max_lookback_prs }}"
+              value="{{ lookback_prs }}"
+              aria-describedby="lookback-hint"
+              required
+            />
+            <span class="field-hint" id="lookback-hint">
+              More PRs give steadier percentiles but take longer to fetch.
+            </span>
           </label>
 
+          <label class="checkbox-label">
+            <input
+              type="checkbox"
+              name="include_drafts"
+              value="1"
+              {% if include_drafts %}checked{% endif %}
+            />
+            <span>
+              Include draft PRs
+              {{ tip("Drafts are not yet awaiting review. Leaving them out gives a truer picture of the review backlog.") }}
+            </span>
+          </label>
 
-          <button type="submit">Run Estimate</button>
+          <button type="submit" class="submit-button" id="submit-button">
+            <span class="submit-label">Run Estimate</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+
+          <p class="form-status" id="form-status" role="status" aria-live="polite"></p>
         </form>
       </section>
 
       {% if error %}
-      <section class="panel alert">{{ error }}</section>
+      <section class="panel alert" role="alert">
+        <strong>Could not build the estimate.</strong>
+        <p>{{ error }}</p>
+      </section>
       {% endif %}
 
       {% if result %}
-      <section class="panel metrics">
-        <h2>{{ result.owner }}/{{ result.repository }}</h2>
+      <section class="panel metrics" aria-labelledby="results-heading">
+        <div class="metrics-header">
+          <h2 id="results-heading">{{ result.owner }}/{{ result.repository }}</h2>
+          <p class="provenance">
+            Fetched <time datetime="{{ result.fetched_at }}" id="fetched-at">{{ result.fetched_at }}</time>
+            &middot; {{ result.merged_pr_count | thousands }} merged PRs from
+            {{ result.sample_window_pr_count | thousands }} sampled
+            {% if result.rate_limit_remaining is not none %}
+            &middot; {{ result.rate_limit_remaining | thousands }} GitHub requests left this hour
+            {% endif %}
+          </p>
+        </div>
+
+        {% if not result.sample_is_reliable %}
+        <p class="notice" role="note">
+          Only {{ result.merged_pr_count }} merged PRs in the sample. Percentiles need
+          about {{ result.min_reliable_sample }} observations before they describe a
+          distribution rather than individual PRs — treat the tail figures as indicative.
+        </p>
+        {% endif %}
+
+        {% if not result.history_window_applied %}
+        <p class="notice" role="note">
+          Nothing merged in the last {{ result.history_window_days }} days, so the full
+          sample was used regardless of age. These durations may not reflect how the
+          team works today.
+        </p>
+        {% endif %}
+
+        {% if result.open_prs_truncated %}
+        <p class="notice" role="note">
+          Showing the {{ result.active_pr_count }} most recent open PRs
+          {%- if result.open_pr_total_available %} of {{ result.open_pr_total_available | thousands }} total{% endif -%}
+          . Counts below describe the shown set only.
+        </p>
+        {% endif %}
+
         <div class="grid">
-          <article>
-            <h3>Active Pull Requests <span class="tip" data-tooltip="Number of currently open PRs in this repository">?</span></h3>
-            <p class="big">{{ result.active_pr_count }}</p>
-            <p>Estimated from merged-history baseline</p>
+          <article class="highlight">
+            <h3>
+              Next PR Forecast
+              {{ tip("Expected calendar time from opening a PR to merging it, blending this repository's median and p75 to hedge against queue risk.") }}
+            </h3>
+            <p class="big">{{ result.estimate_next_pr_hours | humanize_hours }}</p>
+            <p>
+              {{ band(result.risk_band) }}
+              {% if result.risk_thresholds %}
+              <span class="muted-note">
+                typical &le; {{ result.risk_thresholds.low_max | humanize_hours }},
+                tail &gt; {{ result.risk_thresholds.medium_max | humanize_hours }}
+              </span>
+              {% endif %}
+            </p>
           </article>
+
           <article>
-            <h3>Median Merge <span class="tip" data-tooltip="The middle value of all merged PR durations — half merged faster, half slower">?</span></h3>
-            <p class="big">{{ result.median_merge_hours }}h</p>
-            <p>Average: {{ result.average_merge_hours }}h</p>
+            <h3>
+              Median Merge
+              {{ tip("The middle value of all merged PR durations — half merged faster, half slower. Unaffected by one abandoned PR, unlike an average.") }}
+            </h3>
+            <p class="big">{{ result.median_merge_hours | humanize_hours }}</p>
+            <p>
+              Trimmed average: {{ result.average_merge_hours | humanize_hours }}
+              {{ tip("Mean after discarding the slowest and fastest 5%, so a single six-month PR cannot dominate it.") }}
+            </p>
           </article>
+
           <article>
-            <h3>Tail Latency <span class="tip" data-tooltip="p75 = 75% of PRs merged within this time. p90 = 90% merged within this time. Higher values indicate long-running outliers.">?</span></h3>
-            <p class="big">p75 {{ result.p75_merge_hours }}h</p>
-            <p>p90 {{ result.p90_merge_hours }}h</p>
+            <h3>
+              Tail Latency
+              {{ tip("p75 means 75% of PRs merged within this time; p90 means 90% did. The gap between median and p90 is how unpredictable this repo is.") }}
+            </h3>
+            <p class="big">p75 {{ result.p75_merge_hours | humanize_hours }}</p>
+            <p>p90 {{ result.p90_merge_hours | humanize_hours }}</p>
           </article>
+
           <article>
-            <h3>Sample Quality <span class="tip" data-tooltip="How many merged PRs were found in the sample. More merged PRs = more reliable estimates.">?</span></h3>
-            <p class="big">{{ result.merged_pr_count }}</p>
-            <p>Merged PRs from {{ result.sample_window_pr_count }} sampled</p>
+            <h3>
+              Review Queue
+              {{ tip("PRs currently awaiting review, and how much active reviewer time clearing them would take.") }}
+            </h3>
+            <p class="big">{{ result.ready_pr_count }}</p>
+            <p>
+              {{ result.total_review_effort_hours | humanize_hours }} of review effort
+              {% if result.draft_pr_count %}&middot; {{ result.draft_pr_count }} draft{{ "s" if result.draft_pr_count != 1 }}{% endif %}
+              {% if result.overdue_pr_count %}
+              &middot; <strong class="overdue-text">{{ result.overdue_pr_count }} overdue</strong>
+              {% endif %}
+            </p>
           </article>
+        </div>
+
+        {% if result.size_bucket_stats %}
+        <details class="buckets" open>
+          <summary>
+            How merge time varies with PR size
+            {{ tip("Open PRs are matched to the bucket of similarly sized historical PRs to produce their forecast. Buckets with fewer than 3 PRs fall back to the repository-wide baseline.") }}
+          </summary>
+          <div class="table-wrap">
+            <table class="bucket-table">
+              <caption class="sr-only">
+                Median and p75 merge time by pull request size bucket
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Size</th>
+                  <th scope="col">Median</th>
+                  <th scope="col">p75</th>
+                  <th scope="col">PRs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for name, label in [("small", "Under 100 lines"), ("medium", "100–500 lines"), ("large", "500–1,500 lines"), ("xl", "Over 1,500 lines")] %}
+                {% set stats = result.size_bucket_stats.get(name) %}
+                {% if stats %}
+                <tr>
+                  <th scope="row">{{ label }}</th>
+                  <td>{{ stats.median_hours | humanize_hours }}</td>
+                  <td>{{ stats.p75_hours | humanize_hours }}</td>
+                  <td>
+                    {{ stats.count }}
+                    {% if stats.count < 3 %}<span class="thin-note">thin</span>{% endif %}
+                  </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+        {% endif %}
+
+        <div class="table-toolbar">
+          <label class="filter-field">
+            <span>Filter PRs</span>
+            <input
+              type="search"
+              id="pr-filter"
+              placeholder="Title or author"
+              autocomplete="off"
+            />
+          </label>
+
+          <div class="filter-field dropdown-field">
+            <span class="filter-label">
+              Schedule risk
+              {{ tip("Schedule risk relative to this repository: low is at or better than the median, high is in the repo's own p90 tail. Overdue means the PR has been open longer than similarly sized PRs typically take to merge.") }}
+            </span>
+            <div class="dropdown-check" id="risk-dropdown">
+              <button type="button" class="dropdown-toggle" id="risk-toggle" aria-haspopup="true" aria-expanded="false">
+                <span class="dropdown-toggle-label">All risks</span>
+                <svg class="dropdown-chevron" width="10" height="6" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </button>
+              <div class="dropdown-menu" role="group" aria-label="Filter by schedule risk" hidden>
+                <label class="dropdown-item"><input type="checkbox" value="low" /><span class="risk low">Low</span></label>
+                <label class="dropdown-item"><input type="checkbox" value="medium" /><span class="risk medium">Medium</span></label>
+                <label class="dropdown-item"><input type="checkbox" value="high" /><span class="risk high">High</span></label>
+                <label class="dropdown-item"><input type="checkbox" value="overdue" /><span class="risk overdue">Overdue</span></label>
+              </div>
+            </div>
+          </div>
+
+          <p class="row-count" id="row-count" role="status" aria-live="polite"></p>
         </div>
 
         <div class="table-wrap">
           <table id="pr-table">
-            <colgroup>
-              <col style="width: 18%;" /><!-- PR -->
-              <col style="width: 10%;" /><!-- Author -->
-              <col style="width: 9%;" /><!-- Age -->
-              <col style="width: 14%;" /><!-- Change Size -->
-              <col style="width: 8%;" /><!-- Files -->
-              <col style="width: 10%;" /><!-- Reviewers -->
-              <col style="width: 17%;" /><!-- Est. Review & Merge -->
-              <col style="width: 14%;" /><!-- Risk -->
-            </colgroup>
+            <caption class="sr-only">
+              Open pull requests with estimated review effort and projected merge time.
+              Column headers with a sort button can be activated to reorder rows.
+            </caption>
             <thead>
               <tr>
-                <th class="sortable" data-col="0" data-type="num"><span class="sort-label">PR</span> <span class="tip" data-tooltip="Pull request number and title">?</span></th>
-                <th>Author <span class="tip" data-tooltip="GitHub username who opened the PR">?</span></th>
-                <th class="sortable" data-col="2" data-type="num"><span class="sort-label">Age (h)</span> <span class="tip" data-tooltip="Hours since the PR was opened">?</span></th>
-                <th class="sortable" data-col="3" data-type="num"><span class="sort-label">Change Size</span> <span class="tip" data-tooltip="Lines added / lines deleted in this PR">?</span></th>
-                <th class="sortable" data-col="4" data-type="num"><span class="sort-label">Files</span> <span class="tip" data-tooltip="Number of files modified in this PR">?</span></th>
-                <th class="sortable" data-col="5" data-type="num"><span class="sort-label">Reviewers</span> <span class="tip" data-tooltip="Number of reviewers currently requested">?</span></th>
-                <th class="sortable" data-col="6" data-type="num"><span class="sort-label">Review Effort (h)</span> <span class="tip" data-tooltip="Estimated hours of active reviewer time to read the diff, understand the changes, and merge. Based on lines added/deleted, file count, and cognitive load research.">?</span></th>
-                <th class="sortable" data-col="7" data-type="risk"><span class="sort-label">Risk</span> <span class="tip" data-tooltip="Effort band: low (&lt;1h quick review), medium (1–4h substantial), high (&gt;4h major effort)">?</span></th>
+                <th scope="col" class="sortable" data-col="0" aria-sort="none">
+                  <button type="button" class="sort-button">PR</button>
+                  {{ tip("Pull request number and title. Draft PRs are marked.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="1" aria-sort="none">
+                  <button type="button" class="sort-button">Author</button>
+                  {{ tip("GitHub username who opened the PR.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="2" aria-sort="none">
+                  <button type="button" class="sort-button">Age</button>
+                  {{ tip("How long the PR has been open.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="3" aria-sort="none">
+                  <button type="button" class="sort-button">Change Size</button>
+                  {{ tip("Lines added and deleted. Sorting uses the combined total, not just additions.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="4" aria-sort="none">
+                  <button type="button" class="sort-button">Files</button>
+                  {{ tip("Number of files modified. Generated and vendored files are counted but discounted in the effort estimate.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="5" aria-sort="none">
+                  <button type="button" class="sort-button">Reviewers</button>
+                  {{ tip("Number of reviewers currently requested.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="6" aria-sort="none">
+                  <button type="button" class="sort-button">Review Effort</button>
+                  {{ tip("Estimated hours of active reviewer time to read the diff and merge it. Derived from lines added and deleted, file count, and code-review throughput research. Generated files are skimmed, not read.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="7" aria-sort="none">
+                  <button type="button" class="sort-button">Merge Forecast</button>
+                  {{ tip("Projected calendar time still remaining, based on how long similarly sized PRs take in this repository, minus how long this one has already been open.") }}
+                </th>
+                <th scope="col" class="sortable" data-col="8" aria-sort="none">
+                  <button type="button" class="sort-button">Risk</button>
+                  {{ tip("Schedule risk relative to this repository: low is at or better than the median, high is in the repo's own p90 tail.") }}
+                </th>
               </tr>
             </thead>
             <tbody>
               {% for pr in result.active_pull_requests %}
-              <tr>
+              {% set total_lines = pr.additions + pr.deletions %}
+              <tr
+                data-author="{{ pr.author | lower }}"
+                data-title="{{ pr.title | lower }}"
+                data-risk="{{ pr.risk_band }}"
+                data-overdue="{{ 'yes' if pr.is_overdue else 'no' }}"
+              >
                 <td data-sort="{{ pr.number }}">
                   <a href="{{ pr.html_url }}" target="_blank" rel="noreferrer">#{{ pr.number }}</a>
-                  <div class="pr-title">{{ pr.title }}</div>
+                  {% if pr.is_draft %}<span class="badge draft">Draft</span>{% endif %}
+                  <div class="pr-title" title="{{ pr.title }}">{{ pr.title }}</div>
                 </td>
-                <td>{{ pr.author }}</td>
-                <td>{{ pr.age_hours }}</td>
-                <td>+{{ pr.additions }} / -{{ pr.deletions }}</td>
-                <td>{{ pr.changed_files }}</td>
-                <td>{{ pr.requested_reviewers }}</td>
-                <td>{{ pr.review_effort_hours }}</td>
-                <td><span class="risk {{ pr.risk_band }}">{{ pr.risk_band }}</span></td>
+                <td data-sort="{{ pr.author | lower }}">{{ pr.author }}</td>
+                <td data-sort="{{ pr.age_hours }}">{{ pr.age_hours | humanize_hours }}</td>
+                <td data-sort="{{ total_lines }}">
+                  <span class="added">+{{ pr.additions | thousands }}</span>
+                  <span class="removed">-{{ pr.deletions | thousands }}</span>
+                </td>
+                <td data-sort="{{ pr.changed_files }}">
+                  {{ pr.changed_files | thousands }}
+                  {% if pr.generated_file_count %}
+                  <span
+                    class="thin-note"
+                    title="{{ pr.generated_file_count }} generated or vendored file(s) discounted in the effort estimate"
+                    >{{ pr.generated_file_count }} gen</span
+                  >
+                  {% endif %}
+                </td>
+                <td data-sort="{{ pr.requested_reviewers }}">{{ pr.requested_reviewers }}</td>
+                <td data-sort="{{ pr.review_effort_hours }}">
+                  {{ pr.review_effort_hours | humanize_hours }}
+                  <span class="band-dot {{ pr.effort_band }}" aria-hidden="true"></span>
+                  <span class="sr-only">{{ pr.effort_band }} effort</span>
+                </td>
+                <td data-sort="{{ pr.estimated_remaining_hours }}">
+                  {% if pr.is_overdue %}
+                  <span class="overdue-text">
+                    {{ pr.overdue_by_hours | humanize_hours }} over
+                  </span>
+                  <div class="forecast-note">
+                    {{ pr.estimated_remaining_hours | humanize_hours }} of review left
+                  </div>
+                  {% else %}
+                  {{ pr.estimated_remaining_hours | humanize_hours }} left
+                  <div class="forecast-note">
+                    of {{ pr.estimated_total_merge_hours | humanize_hours }} &middot;
+                    {{ pr.baseline_source }}
+                  </div>
+                  {% endif %}
+                </td>
+                <td data-sort="{{ {'low': 0, 'medium': 1, 'high': 2}[pr.risk_band] }}">
+                  {{ band(pr.risk_band) }}
+                </td>
               </tr>
               {% else %}
               <tr>
-                <td colspan="8">No active pull requests found for this repository.</td>
+                <td colspan="9">No open pull requests found for this repository.</td>
               </tr>
               {% endfor %}
+              <tr class="no-matches" hidden>
+                <td colspan="9">No pull requests match the current filters.</td>
+              </tr>
             </tbody>
           </table>
         </div>
+
+        <p class="footnote">
+          {% if not result.file_details_available %}
+          Per-file data was unavailable, so generated files could not be discounted from
+          review effort. Add a <code>GITHUB_TOKEN</code> to enable it.
+          {% endif %}
+          {% if result.duration_includes_draft_time %}
+          Historical durations are measured from PR creation and include any time spent
+          as a draft; GitHub's PR payload does not expose a ready-for-review timestamp.
+          {% endif %}
+        </p>
       </section>
       {% endif %}
     </main>
 
-    <div class="floating-tooltip" id="floating-tooltip"></div>
+    <div class="floating-tooltip" id="floating-tooltip" role="presentation" aria-hidden="true"></div>
 
     <script>
       document.addEventListener("DOMContentLoaded", function () {
-        // --- Floating tooltip ---
+        // ------------------------------------------------------------------
+        // Tooltips
+        //
+        // The visible tooltip is decorative: every trigger is a <button> whose
+        // aria-label carries the same text, so assistive tech does not depend on
+        // hover at all. For sighted keyboard users the tooltip also appears on
+        // focus, it stays open while the pointer is over it, and Escape closes
+        // it (WCAG 1.4.13).
+        // ------------------------------------------------------------------
         var tooltip = document.getElementById("floating-tooltip");
-        var tips = document.querySelectorAll(".tip");
+        var hideTimer = null;
+        var activeTrigger = null;
 
-        tips.forEach(function (el) {
-          el.addEventListener("mouseenter", function (e) {
-            var text = el.getAttribute("data-tooltip");
-            if (!text) return;
-            tooltip.textContent = text;
-            tooltip.classList.add("visible");
+        function positionTooltip(trigger) {
+          var rect = trigger.getBoundingClientRect();
+          var tipRect = tooltip.getBoundingClientRect();
+          var top = rect.top - tipRect.height - 8;
+          var left = rect.left + rect.width / 2 - tipRect.width / 2;
 
-            var rect = el.getBoundingClientRect();
-            var tipRect = tooltip.getBoundingClientRect();
-            var top = rect.top - tipRect.height - 8;
-            var left = rect.left + rect.width / 2 - tipRect.width / 2;
+          if (top < 4) {
+            top = rect.bottom + 8;
+          }
+          if (left < 4) left = 4;
+          if (left + tipRect.width > window.innerWidth - 4) {
+            left = window.innerWidth - tipRect.width - 4;
+          }
 
-            // If it would clip above the viewport, show below instead
-            if (top < 4) {
-              top = rect.bottom + 8;
-            }
-            // Keep within horizontal bounds
-            if (left < 4) left = 4;
-            if (left + tipRect.width > window.innerWidth - 4) {
-              left = window.innerWidth - tipRect.width - 4;
-            }
+          tooltip.style.top = top + "px";
+          tooltip.style.left = left + "px";
+        }
 
-            tooltip.style.top = top + "px";
-            tooltip.style.left = left + "px";
+        function showTooltip(trigger) {
+          var text = trigger.getAttribute("data-tooltip");
+          if (!text) return;
+          window.clearTimeout(hideTimer);
+          activeTrigger = trigger;
+          tooltip.textContent = text;
+          tooltip.classList.add("visible");
+          positionTooltip(trigger);
+        }
+
+        function hideTooltip(immediate) {
+          window.clearTimeout(hideTimer);
+          hideTimer = window.setTimeout(
+            function () {
+              tooltip.classList.remove("visible");
+              // Move the tooltip off-screen so the invisible element cannot
+              // intercept pointer events over nearby buttons. Without this,
+              // after a tooltip was shown the z-index:9999 element stayed at
+              // its last position with opacity:0, stealing clicks from sort
+              // buttons and the dropdown beneath it.
+              tooltip.style.top = "-9999px";
+              tooltip.style.left = "-9999px";
+              activeTrigger = null;
+            },
+            immediate ? 0 : 120
+          );
+        }
+
+        document.querySelectorAll(".tip").forEach(function (el) {
+          el.addEventListener("mouseenter", function () {
+            showTooltip(el);
           });
-
           el.addEventListener("mouseleave", function () {
-            tooltip.classList.remove("visible");
+            hideTooltip(false);
+          });
+          el.addEventListener("focus", function () {
+            showTooltip(el);
+          });
+          el.addEventListener("blur", function () {
+            hideTooltip(true);
+          });
+          el.addEventListener("click", function (event) {
+            // Info-only control: never let it submit the surrounding form.
+            event.preventDefault();
           });
         });
 
-        // --- Table sorting ---
+        // Keep the tooltip open while it is hovered, so users who need to
+        // magnify or read slowly can reach it.
+        tooltip.addEventListener("mouseenter", function () {
+          window.clearTimeout(hideTimer);
+        });
+        tooltip.addEventListener("mouseleave", function () {
+          hideTooltip(false);
+        });
+
+        document.addEventListener("keydown", function (event) {
+          if (event.key === "Escape" && activeTrigger) {
+            hideTooltip(true);
+          }
+        });
+
+        window.addEventListener(
+          "scroll",
+          function () {
+            if (activeTrigger) positionTooltip(activeTrigger);
+          },
+          { passive: true }
+        );
+
+        // ------------------------------------------------------------------
+        // Submit feedback
+        //
+        // A run can take tens of seconds. Without this the page simply appears
+        // to hang.
+        // ------------------------------------------------------------------
+        var form = document.getElementById("estimate-form");
+        var submitButton = document.getElementById("submit-button");
+        var formStatus = document.getElementById("form-status");
+
+        if (form && submitButton) {
+          form.addEventListener("submit", function () {
+            submitButton.disabled = true;
+            submitButton.classList.add("is-loading");
+            submitButton.querySelector(".submit-label").textContent = "Estimating…";
+            if (formStatus) {
+              formStatus.textContent =
+                "Fetching pull request history from GitHub. Large samples can take up to a minute.";
+            }
+          });
+        }
+
+        // ------------------------------------------------------------------
+        // Fetch timestamp in the reader's locale
+        // ------------------------------------------------------------------
+        var fetchedAt = document.getElementById("fetched-at");
+        if (fetchedAt) {
+          var parsed = new Date(fetchedAt.getAttribute("datetime"));
+          if (!isNaN(parsed.getTime())) {
+            fetchedAt.textContent = parsed.toLocaleString();
+          }
+        }
+
+        // ------------------------------------------------------------------
+        // Table sorting and filtering
+        // ------------------------------------------------------------------
         var table = document.getElementById("pr-table");
         if (!table) return;
 
-        var headers = table.querySelectorAll("th.sortable");
         var tbody = table.querySelector("tbody");
-
-        var riskOrder = { low: 0, medium: 1, high: 2 };
-
-        function parseNum(text) {
-          var n = parseFloat(text.replace(/[^0-9.\-]/g, ""));
-          return isNaN(n) ? 0 : n;
-        }
-
-        function sortTable(colIdx, type, dir) {
-          var rows = Array.from(tbody.querySelectorAll("tr"));
-          rows.sort(function (a, b) {
-            var aCell = a.cells[colIdx];
-            var bCell = b.cells[colIdx];
-            if (!aCell || !bCell) return 0;
-
-            var aVal = aCell.getAttribute("data-sort");
-            var bVal = bCell.getAttribute("data-sort");
-            var aText = aVal || aCell.textContent.trim();
-            var bText = bVal || bCell.textContent.trim();
-            var cmp = 0;
-
-            if (type === "risk") {
-              cmp = (riskOrder[aText] || 0) - (riskOrder[bText] || 0);
-            } else {
-              cmp = parseNum(aText) - parseNum(bText);
-            }
-
-            return dir === "asc" ? cmp : -cmp;
+        var headers = Array.prototype.slice.call(table.querySelectorAll("th.sortable"));
+        var noMatchesRow = tbody.querySelector(".no-matches");
+        var dataRows = Array.prototype.slice
+          .call(tbody.querySelectorAll("tr"))
+          .filter(function (row) {
+            return row !== noMatchesRow && row.hasAttribute("data-risk");
           });
 
-          rows.forEach(function (row) {
-            tbody.appendChild(row);
+        var filterInput = document.getElementById("pr-filter");
+        var riskDropdown = document.getElementById("risk-dropdown");
+        var riskToggle = document.getElementById("risk-toggle");
+        var riskMenu = riskDropdown ? riskDropdown.querySelector(".dropdown-menu") : null;
+        var riskCheckboxes = riskMenu ? Array.prototype.slice.call(riskMenu.querySelectorAll('input[type="checkbox"]')) : [];
+        var rowCount = document.getElementById("row-count");
+
+        var riskRank = { low: 0, medium: 1, high: 2 };
+
+        // --- Dropdown open/close behaviour ---
+        function openDropdown() {
+          if (!riskMenu || !riskToggle) return;
+          riskMenu.hidden = false;
+          riskToggle.setAttribute("aria-expanded", "true");
+        }
+
+        function closeDropdown() {
+          if (!riskMenu || !riskToggle) return;
+          riskMenu.hidden = true;
+          riskToggle.setAttribute("aria-expanded", "false");
+        }
+
+        if (riskToggle) {
+          riskToggle.addEventListener("click", function (e) {
+            e.stopPropagation();
+            if (riskMenu && riskMenu.hidden) {
+              openDropdown();
+            } else {
+              closeDropdown();
+            }
+          });
+        }
+
+        // Close the dropdown when clicking outside it.
+        document.addEventListener("click", function (e) {
+          if (riskDropdown && !riskDropdown.contains(e.target)) {
+            closeDropdown();
+          }
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && riskMenu && !riskMenu.hidden) {
+            closeDropdown();
+            if (riskToggle) riskToggle.focus();
+          }
+        });
+
+        function updateToggleLabel() {
+          if (!riskToggle) return;
+          var checked = riskCheckboxes.filter(function (cb) { return cb.checked; });
+          var labelEl = riskToggle.querySelector(".dropdown-toggle-label");
+          if (!labelEl) return;
+          if (checked.length === 0) {
+            labelEl.textContent = "All risks";
+          } else {
+            labelEl.textContent = checked.map(function (cb) {
+              return cb.value.charAt(0).toUpperCase() + cb.value.slice(1);
+            }).join(", ");
+          }
+        }
+
+        riskCheckboxes.forEach(function (cb) {
+          cb.addEventListener("change", function () {
+            updateToggleLabel();
+            applyFilters();
+          });
+        });
+
+        // Every sortable cell carries an explicit data-sort value, so sorting
+        // never has to guess a number out of display text. The old parser read
+        // "+120 / -30" as 120, silently sorting change size by additions only.
+        function cellValue(row, index) {
+          var cell = row.cells[index];
+          if (!cell) return "";
+          var raw = cell.getAttribute("data-sort");
+          return raw === null ? cell.textContent.trim() : raw;
+        }
+
+        function compare(a, b, index) {
+          var aRaw = cellValue(a, index);
+          var bRaw = cellValue(b, index);
+          var aNum = parseFloat(aRaw);
+          var bNum = parseFloat(bRaw);
+          var bothNumeric =
+            !isNaN(aNum) && !isNaN(bNum) && aRaw !== "" && bRaw !== "";
+
+          if (bothNumeric) return aNum - bNum;
+          return String(aRaw).localeCompare(String(bRaw));
+        }
+
+        function sortBy(index, direction) {
+          var sorted = dataRows.slice().sort(function (a, b) {
+            var result = compare(a, b, index);
+            return direction === "ascending" ? result : -result;
+          });
+          sorted.forEach(function (row) {
+            tbody.insertBefore(row, noMatchesRow);
           });
         }
 
         headers.forEach(function (th) {
-          var label = th.querySelector(".sort-label");
-          if (!label) return;
+          var button = th.querySelector(".sort-button");
+          if (!button) return;
 
-          label.addEventListener("click", function () {
-            var col = parseInt(th.dataset.col);
-            var type = th.dataset.type;
-            var currentDir = th.classList.contains("asc") ? "asc" : th.classList.contains("desc") ? "desc" : null;
-            var newDir = currentDir === "asc" ? "desc" : "asc";
+          button.addEventListener("click", function () {
+            var index = parseInt(th.getAttribute("data-col"), 10);
+            var current = th.getAttribute("aria-sort");
+            var next = current === "ascending" ? "descending" : "ascending";
 
-            headers.forEach(function (h) {
-              h.classList.remove("asc", "desc");
+            headers.forEach(function (other) {
+              other.setAttribute("aria-sort", "none");
             });
-            th.classList.add(newDir);
-            sortTable(col, type, newDir);
+            th.setAttribute("aria-sort", next);
+
+            sortBy(index, next);
           });
         });
+
+        function applyFilters() {
+          var query = (filterInput && filterInput.value.trim().toLowerCase()) || "";
+
+          // Build set of active risk filters from checked boxes.
+          var activeRisks = {};
+          var anyRiskChecked = false;
+          riskCheckboxes.forEach(function (cb) {
+            if (cb.checked) {
+              activeRisks[cb.value] = true;
+              anyRiskChecked = true;
+            }
+          });
+
+          var visible = 0;
+
+          dataRows.forEach(function (row) {
+            var matches = true;
+
+            if (query) {
+              var haystack =
+                row.getAttribute("data-title") + " " + row.getAttribute("data-author");
+              matches = haystack.indexOf(query) !== -1;
+            }
+
+            if (matches && anyRiskChecked) {
+              var rowRisk = row.getAttribute("data-risk");
+              var rowOverdue = row.getAttribute("data-overdue") === "yes";
+
+              // If only "overdue" is checked, show all overdue rows.
+              // If risk levels are checked alongside "overdue", show rows
+              // matching those risk levels that are also overdue.
+              var riskMatch = !!activeRisks[rowRisk];
+              var overdueChecked = !!activeRisks["overdue"];
+              var hasOtherRisks = Object.keys(activeRisks).some(function (k) { return k !== "overdue"; });
+
+              if (overdueChecked && !hasOtherRisks) {
+                matches = rowOverdue;
+              } else if (overdueChecked && hasOtherRisks) {
+                matches = riskMatch && rowOverdue;
+              } else {
+                matches = riskMatch;
+              }
+            }
+
+            row.hidden = !matches;
+            if (matches) visible += 1;
+          });
+
+          if (noMatchesRow) {
+            noMatchesRow.hidden = visible > 0 || dataRows.length === 0;
+          }
+
+          if (rowCount) {
+            if (dataRows.length === 0) {
+              rowCount.textContent = "";
+            } else if (visible === dataRows.length) {
+              rowCount.textContent = visible + " open PRs";
+            } else {
+              rowCount.textContent = visible + " of " + dataRows.length + " open PRs";
+            }
+          }
+        }
+
+        if (filterInput) {
+          filterInput.addEventListener("input", applyFilters);
+        }
+
+        applyFilters();
       });
     </script>
   </body>

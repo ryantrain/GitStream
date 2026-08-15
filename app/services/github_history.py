@@ -1,341 +1,506 @@
+"""Estimation statistics derived from a repository's pull request history.
+
+This module is pure calculation: it takes pull request dictionaries (as produced
+by ``github_client``) and turns them into duration statistics, review-effort
+estimates and calendar-time forecasts. Network access lives in
+``app.services.github_client``.
+
+Three things are worth knowing before reading the numbers this produces:
+
+* **Percentiles interpolate.** See ``app.services.stats.percentile``.
+* **Risk bands are relative to the repository.** A fixed 12h/36h threshold
+  labelled every PR in a slow repository "high", which carries no information.
+  Bands are now cut at the repository's own median and p90, and the thresholds
+  are returned so the UI can show what they mean.
+* **Durations are measured from PR creation.** GitHub's REST payload carries no
+  ``ready_for_review`` timestamp, so time spent as a draft is included in
+  historical merge durations. Recovering it costs one timeline request per PR,
+  which the estimator's request budget cannot absorb; the limitation is
+  surfaced to the user rather than hidden. Open drafts *are* identified and can
+  be excluded from the active queue.
+"""
+
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from math import ceil
-from statistics import mean, median
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
 
-import requests
+from app.services.github_client import GithubHistoryError
+from app.services.stats import (
+    MIN_RELIABLE_SAMPLE,
+    percentile,
+    robust_center,
+    trimmed_mean,
+)
 
-GITHUB_API_URL = "https://api.github.com"
+# ---------------------------------------------------------------------------
+# Sampling
+# ---------------------------------------------------------------------------
+
+# The REST pulls endpoint cannot sort by merge date, so the sample is ordered by
+# last update. A pull request closed two years ago but commented on yesterday
+# appears near the top of that ordering and would otherwise contribute its
+# (very long) duration to "recent" statistics. Restricting to merges inside this
+# window removes that contamination.
+DEFAULT_HISTORY_WINDOW_DAYS = 180
+
+# Size buckets in total changed lines. Open PRs are matched to the bucket of
+# similarly sized historical PRs to get a calendar-time baseline.
+SIZE_BUCKETS: tuple[tuple[str, float], ...] = (
+    ("small", 100),
+    ("medium", 500),
+    ("large", 1500),
+    ("xl", float("inf")),
+)
+
+# Observations needed before a bucket's own baseline is preferred over the
+# repository-wide baseline.
+MIN_BUCKET_SAMPLE = 3
+
+# ---------------------------------------------------------------------------
+# Review effort model
+# ---------------------------------------------------------------------------
+
+# Reading throughput tiers as (span_of_lines, lines_per_hour). Effort is the
+# integral over these tiers, so the curve is continuous: the old step function
+# jumped 34% between a 200-line and a 201-line diff.
+READING_TIERS: tuple[tuple[float, float], ...] = (
+    (200, 400.0),  # fresh attention
+    (800, 300.0),  # attention degrading
+    (4000, 200.0),  # heavy cognitive load
+    (float("inf"), 600.0),  # bulk/mechanical territory, scanned rather than read
+)
+
+# Deletions are verified rather than understood.
+DELETION_SCAN_RATE = 800.0
+
+# Generated and vendored content is skimmed, not read.
+GENERATED_SCAN_RATE = 3000.0
+
+# Per-file context switching, and the sub-linear cost of relating files.
+FILE_SWITCH_HOURS = 4.0 / 60.0
+COMPREHENSION_FREE_FILES = 5
+COMPREHENSION_HOURS_PER_FILE = 5.0 / 60.0
+COMPREHENSION_EXPONENT = 0.6
+
+# Reading CI, resolving trivia, clicking merge.
+MERGE_OVERHEAD_HOURS = 5.0 / 60.0
+
+# Even a one-line change costs a context switch.
+MIN_REVIEW_EFFORT_HOURS = 10.0 / 60.0
+
+# Effort bands, in hours of active reviewer time. These are absolute by design:
+# they describe a human's attention budget, which does not vary by repository.
+EFFORT_BAND_LOW_MAX = 1.0
+EFFORT_BAND_MEDIUM_MAX = 4.0
+
+# Filenames and path fragments whose diffs are machine-generated.
+GENERATED_FILENAMES = frozenset(
+    {
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "pipfile.lock",
+        "cargo.lock",
+        "composer.lock",
+        "gemfile.lock",
+        "go.sum",
+        "gradle.lockfile",
+        "mix.lock",
+        "flake.lock",
+    }
+)
+
+GENERATED_PATH_MARKERS: tuple[str, ...] = (
+    "/vendor/",
+    "/node_modules/",
+    "/dist/",
+    "/build/",
+    "/__snapshots__/",
+    "/generated/",
+    ".generated.",
+    "_pb2.py",
+    "_pb2_grpc.py",
+    ".pb.go",
+    ".min.js",
+    ".min.css",
+    ".map",
+    ".snap",
+    ".svg",
+)
 
 
-class GithubHistoryError(RuntimeError):
-    pass
+# ---------------------------------------------------------------------------
+# Timestamps
+# ---------------------------------------------------------------------------
 
 
 def _parse_github_timestamp(value: str | None) -> datetime | None:
+    """Parse a GitHub timestamp into an aware UTC datetime.
+
+    Accepts both the ``...Z`` form the REST API returns and the offset form
+    (``+00:00``) that GraphQL and some endpoints use. The previous strict
+    ``strptime`` pattern raised an uncaught ``ValueError`` on the latter, which
+    surfaced as a 500 from the estimate page.
+    """
     if not value:
         return None
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+
+    text = value.strip()
+    if text.endswith(("z", "Z")):
+        text = f"{text[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
-def _percentile(sorted_values: list[float], q: float) -> float:
-    if not sorted_values:
-        return 0.0
-    if q <= 0:
-        return sorted_values[0]
-    if q >= 1:
-        return sorted_values[-1]
-
-    idx = ceil(q * len(sorted_values)) - 1
-    idx = max(0, min(idx, len(sorted_values) - 1))
-    return sorted_values[idx]
+# ---------------------------------------------------------------------------
+# Sizing helpers
+# ---------------------------------------------------------------------------
 
 
-def _risk_band(hours: float) -> str:
-    if hours < 12:
-        return "low"
-    if hours < 36:
-        return "medium"
-    return "high"
+def size_bucket_for(total_lines: float) -> str:
+    """Return the size bucket name for a total changed-line count."""
+    for name, upper in SIZE_BUCKETS:
+        if total_lines < upper:
+            return name
+    return SIZE_BUCKETS[-1][0]
 
 
-def fetch_closed_pr_history(
-    owner: str,
-    repository: str,
-    lookback_prs: int,
-    github_token: str | None = None,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    page = 1
-    per_page = 100
+def _is_generated_path(path: str) -> bool:
+    """Whether a file path looks machine-generated or vendored."""
+    lowered = path.lower()
+    basename = lowered.rsplit("/", 1)[-1]
 
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if github_token:
-        headers["Authorization"] = f"Bearer {github_token}"
+    if basename in GENERATED_FILENAMES:
+        return True
 
-    owner_slug = quote(owner)
-    repo_slug = quote(repository)
-
-    while len(results) < lookback_prs:
-        response = requests.get(
-            f"{GITHUB_API_URL}/repos/{owner_slug}/{repo_slug}/pulls",
-            params={
-                "state": "closed",
-                "sort": "updated",
-                "direction": "desc",
-                "per_page": per_page,
-                "page": page,
-            },
-            headers=headers,
-            timeout=20,
-        )
-
-        if response.status_code == 404:
-            raise GithubHistoryError("Repository not found.")
-        if response.status_code == 403:
-            raise GithubHistoryError(
-                "GitHub API rate limit hit. If you haven't configured a token, add a personal access token to your .env file (GITHUB_TOKEN) for more requests."
-            )
-        if response.status_code >= 400:
-            raise GithubHistoryError(
-                f"GitHub API returned status {response.status_code}."
-            )
-
-        page_items = response.json()
-        if not isinstance(page_items, list) or not page_items:
-            break
-
-        results.extend(page_items)
-        page += 1
-
-    return results[:lookback_prs]
+    # Normalise so a marker like "/dist/" also matches a leading "dist/".
+    padded = f"/{lowered}"
+    return any(marker in padded for marker in GENERATED_PATH_MARKERS)
 
 
-def _fetch_pr_detail(
-    owner_slug: str,
-    repo_slug: str,
-    pr_number: int,
-    headers: dict[str, str],
-) -> dict[str, Any] | None:
-    """Fetch a single PR's detail to get additions/deletions/changed_files."""
-    response = requests.get(
-        f"{GITHUB_API_URL}/repos/{owner_slug}/{repo_slug}/pulls/{pr_number}",
-        headers=headers,
-        timeout=20,
-    )
-    if response.status_code == 200:
-        return response.json()
-    return None
+def classify_change(
+    additions: int,
+    deletions: int,
+    files: list[dict[str, Any]] | None,
+) -> dict[str, int]:
+    """Split a diff into human-reviewable and machine-generated portions.
 
+    When per-file data is unavailable (the unauthenticated REST path) everything
+    is treated as reviewable, which is the conservative assumption.
+    """
+    if not files:
+        return {
+            "reviewable_additions": additions,
+            "reviewable_deletions": deletions,
+            "generated_additions": 0,
+            "generated_deletions": 0,
+            "generated_file_count": 0,
+            "reviewable_file_count": 0,
+        }
 
-def fetch_open_pull_requests(
-    owner: str,
-    repository: str,
-    github_token: str | None = None,
-    limit: int = 100,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    page = 1
-    per_page = 100
+    generated_add = generated_del = generated_files = 0
+    reviewable_add = reviewable_del = reviewable_files = 0
 
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if github_token:
-        headers["Authorization"] = f"Bearer {github_token}"
+    for entry in files:
+        path = str(entry.get("path") or "")
+        add = int(entry.get("additions") or 0)
+        dele = int(entry.get("deletions") or 0)
 
-    owner_slug = quote(owner)
-    repo_slug = quote(repository)
-
-    while len(results) < limit:
-        response = requests.get(
-            f"{GITHUB_API_URL}/repos/{owner_slug}/{repo_slug}/pulls",
-            params={
-                "state": "open",
-                "sort": "created",
-                "direction": "desc",
-                "per_page": per_page,
-                "page": page,
-            },
-            headers=headers,
-            timeout=20,
-        )
-
-        if response.status_code == 404:
-            raise GithubHistoryError("Repository not found.")
-        if response.status_code == 403:
-            raise GithubHistoryError(
-                "GitHub API rate limit hit. If you haven't configured a token, add a personal access token to your .env file (GITHUB_TOKEN) for more requests."
-            )
-        if response.status_code >= 400:
-            raise GithubHistoryError(
-                f"GitHub API returned status {response.status_code}."
-            )
-
-        page_items = response.json()
-        if not isinstance(page_items, list) or not page_items:
-            break
-
-        results.extend(page_items)
-        page += 1
-
-    results = results[:limit]
-
-    # The list endpoint does not return additions/deletions/changed_files.
-    # Fetch individual PR details to get those fields.
-    for i, pr in enumerate(results):
-        pr_number = pr.get("number")
-        if not pr_number:
-            continue
-        detail = _fetch_pr_detail(owner_slug, repo_slug, pr_number, headers)
-        if detail:
-            results[i]["additions"] = detail.get("additions", 0)
-            results[i]["deletions"] = detail.get("deletions", 0)
-            results[i]["changed_files"] = detail.get("changed_files", 0)
-
-    return results
-
-
-def estimate_from_pr_history(prs: list[dict[str, Any]]) -> dict[str, float | int | str]:
-    merged_durations: list[float] = []
-    # Track (change_size, duration) pairs to build size-bucketed baselines.
-    size_duration_pairs: list[tuple[int, float]] = []
-
-    for pr in prs:
-        created = _parse_github_timestamp(pr.get("created_at"))
-        merged = _parse_github_timestamp(pr.get("merged_at"))
-        if not created or not merged:
-            continue
-
-        duration_hours = (merged - created).total_seconds() / 3600.0
-        if duration_hours >= 0:
-            merged_durations.append(duration_hours)
-            change_size = int(pr.get("additions") or 0) + int(pr.get("deletions") or 0)
-            size_duration_pairs.append((change_size, duration_hours))
-
-    if not merged_durations:
-        raise GithubHistoryError("No merged pull requests found in the selected sample.")
-
-    merged_durations.sort()
-    avg_hours = mean(merged_durations)
-    med_hours = median(merged_durations)
-    p75 = _percentile(merged_durations, 0.75)
-    p90 = _percentile(merged_durations, 0.90)
-
-    # Weighted estimate favors p75 to hedge against queue risk.
-    estimate_next = 0.5 * med_hours + 0.5 * p75
-
-    # Build size-bucketed baselines so we can match open PRs to similarly
-    # sized historical PRs for more accurate estimates.
-    # Buckets: small (<100 lines), medium (100-500), large (500-1500), xl (>1500)
-    size_buckets: dict[str, list[float]] = {
-        "small": [],
-        "medium": [],
-        "large": [],
-        "xl": [],
-    }
-    for size, duration in size_duration_pairs:
-        if size < 100:
-            size_buckets["small"].append(duration)
-        elif size < 500:
-            size_buckets["medium"].append(duration)
-        elif size < 1500:
-            size_buckets["large"].append(duration)
+        if path and _is_generated_path(path):
+            generated_add += add
+            generated_del += dele
+            generated_files += 1
         else:
-            size_buckets["xl"].append(duration)
+            reviewable_add += add
+            reviewable_del += dele
+            reviewable_files += 1
 
-    size_bucket_stats: dict[str, dict[str, float]] = {}
-    for bucket, durations in size_buckets.items():
-        if durations:
-            sorted_d = sorted(durations)
-            size_bucket_stats[bucket] = {
-                "median_hours": median(sorted_d),
-                "p75_hours": _percentile(sorted_d, 0.75),
-                "count": len(sorted_d),
-            }
+    # GraphQL caps the file list, so totals can exceed what we itemised. Assign
+    # the unaccounted remainder to the reviewable side.
+    unaccounted_add = max(additions - (generated_add + reviewable_add), 0)
+    unaccounted_del = max(deletions - (generated_del + reviewable_del), 0)
 
     return {
-        "merged_pr_count": len(merged_durations),
-        "sample_window_pr_count": len(prs),
-        "average_merge_hours": round(avg_hours, 2),
-        "median_merge_hours": round(med_hours, 2),
-        "p75_merge_hours": round(p75, 2),
-        "p90_merge_hours": round(p90, 2),
-        "estimate_next_pr_hours": round(estimate_next, 2),
-        "risk_band": _risk_band(estimate_next),
-        "size_bucket_stats": size_bucket_stats,
+        "reviewable_additions": reviewable_add + unaccounted_add,
+        "reviewable_deletions": reviewable_del + unaccounted_del,
+        "generated_additions": generated_add,
+        "generated_deletions": generated_del,
+        "generated_file_count": generated_files,
+        "reviewable_file_count": reviewable_files,
     }
 
 
-def _estimate_review_effort_hours(
+def _reading_hours(lines: float) -> float:
+    """Integrate the tiered reading-rate curve over ``lines``.
+
+    Continuous and monotone, unlike the previous per-bracket flat rate.
+    """
+    remaining = max(lines, 0.0)
+    hours = 0.0
+
+    for span, rate in READING_TIERS:
+        if remaining <= 0:
+            break
+        take = min(remaining, span)
+        hours += take / rate
+        remaining -= take
+
+    return hours
+
+
+def estimate_review_effort_hours(
     additions: int,
     deletions: int,
     changed_files: int,
+    files: list[dict[str, Any]] | None = None,
 ) -> float:
-    """Estimate active review effort: how long a reviewer sits and reads the diff.
+    """Estimate active review effort: how long a reviewer spends on this diff.
 
     Based on empirical code-review research:
-    - Effective review rate is ~200-400 LOC/hour for net-new logic.
-    - Deletions are faster to verify (~3x faster) — you're confirming removal,
-      not understanding new logic.
-    - Context-switching between files costs ~3-5 min per file.
-    - Very large diffs (>5000 lines) often contain mechanical/generated changes
-      that scan faster, so throughput increases for bulk.
-    - Minimum realistic review: ~10 min (for trivial PRs).
+
+    * Effective review throughput is ~200-400 LOC/hour for net-new logic, and
+      degrades as the diff grows. Modelled as a continuous integral over
+      declining rate tiers.
+    * Deletions are verified rather than understood, so they scan ~2x faster.
+    * Generated and vendored content (lockfiles, minified bundles, snapshots) is
+      skimmed. Without this, a 5,000-line ``package-lock.json`` diff billed 25
+      hours of review effort.
+    * Context switching costs a few minutes per file, and relating files to each
+      other adds a sub-linear comprehension cost.
     """
-    # Lines that need careful reading (additions) vs quick scan (deletions).
-    # Additions require understanding new logic; deletions just need
-    # confirmation that nothing important was removed.
-    careful_lines = additions
-    scan_lines = deletions
+    split = classify_change(additions, deletions, files)
 
-    # Review throughput (lines/hour) — decreases for complex diffs,
-    # increases for very large bulk changes (likely generated/mechanical).
-    if careful_lines <= 200:
-        # Small PRs: reviewer is fresh, can go ~400 LOC/h
-        careful_rate = 400.0
-    elif careful_lines <= 1000:
-        # Medium PRs: attention starts to degrade, ~300 LOC/h
-        careful_rate = 300.0
-    elif careful_lines <= 5000:
-        # Large PRs: significant cognitive load, ~200 LOC/h
-        careful_rate = 200.0
+    reading_hours = _reading_hours(split["reviewable_additions"])
+    deletion_hours = split["reviewable_deletions"] / DELETION_SCAN_RATE
+    generated_hours = (split["generated_additions"] + split["generated_deletions"]) / GENERATED_SCAN_RATE
+
+    # Only files a human actually reads incur switching and comprehension cost.
+    if split["reviewable_file_count"] or split["generated_file_count"]:
+        human_files = split["reviewable_file_count"]
     else:
-        # Very large PRs: likely contains mechanical/generated sections.
-        # First 5000 lines at 200 LOC/h, rest at 600 LOC/h (scanning).
-        careful_rate = None  # handled below
+        human_files = max(changed_files, 0)
 
-    # Deletions scan at ~800 LOC/h (you're verifying, not understanding)
-    scan_rate = 800.0
+    file_switch_hours = max(human_files - 1, 0) * FILE_SWITCH_HOURS
 
-    if careful_rate is not None:
-        reading_hours = careful_lines / careful_rate
-    else:
-        # Tiered: first 5k lines are slow, rest is faster scanning
-        reading_hours = 5000 / 200.0 + (careful_lines - 5000) / 600.0
-
-    deletion_hours = scan_lines / scan_rate
-
-    # Context-switching cost: ~4 minutes per file on average.
-    # First file is "free" (you're already there).
-    file_switch_hours = max(changed_files - 1, 0) * (4.0 / 60.0)
-
-    # Comprehension overhead: understanding how files relate to each other.
-    # Grows sub-linearly — 10 files is harder than 2, but 50 isn't 5x harder than 10.
-    if changed_files > 5:
-        comprehension_hours = (changed_files - 5) ** 0.6 * (5.0 / 60.0)
+    if human_files > COMPREHENSION_FREE_FILES:
+        comprehension_hours = (
+            human_files - COMPREHENSION_FREE_FILES
+        ) ** COMPREHENSION_EXPONENT * COMPREHENSION_HOURS_PER_FILE
     else:
         comprehension_hours = 0.0
-
-    # Merge mechanics: reading CI, resolving trivial issues, clicking merge.
-    merge_overhead_hours = 5.0 / 60.0  # ~5 minutes
 
     total = (
         reading_hours
         + deletion_hours
+        + generated_hours
         + file_switch_hours
         + comprehension_hours
-        + merge_overhead_hours
+        + MERGE_OVERHEAD_HOURS
     )
 
-    # Floor: even a 1-line PR takes ~10 minutes to context-switch into,
-    # read, confirm, and merge.
-    return max(total, 10.0 / 60.0)
+    return float(max(total, MIN_REVIEW_EFFORT_HOURS))
+
+
+def effort_band(hours: float) -> str:
+    """Band a review-effort estimate by a reviewer's attention budget."""
+    if hours < EFFORT_BAND_LOW_MAX:
+        return "low"
+    if hours <= EFFORT_BAND_MEDIUM_MAX:
+        return "medium"
+    return "high"
+
+
+# ---------------------------------------------------------------------------
+# Historical statistics
+# ---------------------------------------------------------------------------
+
+
+def _relative_risk_band(hours: float, thresholds: dict[str, float]) -> str:
+    """Band a calendar-time projection against the repository's own distribution.
+
+    ``low`` means at or better than typical, ``medium`` slower than typical, and
+    ``high`` in the repository's own tail.
+    """
+    if hours <= thresholds["low_max"]:
+        return "low"
+    if hours <= thresholds["medium_max"]:
+        return "medium"
+    return "high"
+
+
+def estimate_from_pr_history(
+    prs: list[dict[str, Any]],
+    history_window_days: int = DEFAULT_HISTORY_WINDOW_DAYS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Compute duration statistics from a sample of closed pull requests.
+
+    Only merged PRs contribute durations. Merges older than
+    ``history_window_days`` are excluded so that stale PRs bumped into the
+    "recently updated" ordering cannot skew the result; if that filter would
+    leave nothing, the full sample is used and ``history_window_applied`` is
+    False so the caller can say so.
+    """
+    now_utc = now or datetime.now(UTC)
+    cutoff = now_utc - timedelta(days=history_window_days)
+
+    # (duration_hours, change_size, merged_at)
+    observations: list[tuple[float, int, datetime]] = []
+    closed_unmerged = 0
+
+    for pr in prs:
+        created = _parse_github_timestamp(pr.get("created_at"))
+        merged = _parse_github_timestamp(pr.get("merged_at"))
+        if not created:
+            continue
+        if not merged:
+            closed_unmerged += 1
+            continue
+
+        duration_hours = (merged - created).total_seconds() / 3600.0
+        if duration_hours < 0:
+            continue
+
+        change_size = int(pr.get("additions") or 0) + int(pr.get("deletions") or 0)
+        observations.append((duration_hours, change_size, merged))
+
+    if not observations:
+        raise GithubHistoryError(
+            "No merged pull requests found in the selected sample. Try increasing the number of PRs to sample."
+        )
+
+    windowed = [obs for obs in observations if obs[2] >= cutoff]
+    history_window_applied = bool(windowed)
+    if not history_window_applied:
+        # Low-activity repository: nothing merged inside the window. Use the
+        # whole sample rather than failing, and tell the caller.
+        windowed = observations
+
+    excluded_stale = len(observations) - len(windowed)
+
+    durations = [obs[0] for obs in windowed]
+    med_hours = robust_center(durations)
+    avg_hours = trimmed_mean(durations)
+    raw_avg_hours = sum(durations) / len(durations)
+    p75 = percentile(durations, 0.75)
+    p90 = percentile(durations, 0.90)
+
+    # Forward-looking single number: blends the typical case with the tail to
+    # hedge against queue risk.
+    estimate_next = 0.5 * med_hours + 0.5 * p75
+
+    # Bands relative to this repository, with the cut points published so the UI
+    # can explain them.
+    risk_thresholds = {"low_max": round(med_hours, 2), "medium_max": round(p90, 2)}
+
+    # Size-bucketed baselines so open PRs can be matched to comparable history.
+    bucketed: dict[str, list[float]] = {name: [] for name, _ in SIZE_BUCKETS}
+    for duration, size, _merged_at in windowed:
+        bucketed[size_bucket_for(size)].append(duration)
+
+    size_bucket_stats: dict[str, dict[str, float]] = {}
+    for bucket, values in bucketed.items():
+        if not values:
+            continue
+        size_bucket_stats[bucket] = {
+            "median_hours": round(robust_center(values), 2),
+            "p75_hours": round(percentile(values, 0.75), 2),
+            "p90_hours": round(percentile(values, 0.90), 2),
+            "count": len(values),
+        }
+
+    merged_count = len(durations)
+
+    return {
+        "merged_pr_count": merged_count,
+        "sample_window_pr_count": len(prs),
+        "closed_unmerged_pr_count": closed_unmerged,
+        "excluded_stale_pr_count": excluded_stale,
+        "history_window_days": history_window_days,
+        "history_window_applied": history_window_applied,
+        "sample_is_reliable": merged_count >= MIN_RELIABLE_SAMPLE,
+        "min_reliable_sample": MIN_RELIABLE_SAMPLE,
+        "average_merge_hours": round(avg_hours, 2),
+        "raw_average_merge_hours": round(raw_avg_hours, 2),
+        "median_merge_hours": round(med_hours, 2),
+        "p75_merge_hours": round(p75, 2),
+        "p90_merge_hours": round(p90, 2),
+        "estimate_next_pr_hours": round(estimate_next, 2),
+        "risk_band": _relative_risk_band(estimate_next, risk_thresholds),
+        "risk_thresholds": risk_thresholds,
+        "size_bucket_stats": size_bucket_stats,
+        # Draft time is included in historical durations; see module docstring.
+        "duration_includes_draft_time": True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Active PR forecast
+# ---------------------------------------------------------------------------
+
+
+def _baseline_for_size(
+    total_lines: int,
+    history_estimate: dict[str, Any],
+) -> tuple[float, str, str]:
+    """Pick a calendar-time baseline for a PR of this size.
+
+    Prefers the median of similarly sized historical PRs, falling back to the
+    repository-wide blended estimate when that bucket is too thin to trust.
+
+    Returns ``(baseline_hours, bucket_name, source_label)``.
+    """
+    bucket = size_bucket_for(total_lines)
+    bucket_stats = (history_estimate.get("size_bucket_stats") or {}).get(bucket)
+
+    if bucket_stats and int(bucket_stats.get("count") or 0) >= MIN_BUCKET_SAMPLE:
+        return (
+            float(bucket_stats["median_hours"]),
+            bucket,
+            f"{bucket} PRs in this repo (n={int(bucket_stats['count'])})",
+        )
+
+    fallback = history_estimate.get("estimate_next_pr_hours")
+    if fallback is None:
+        fallback = history_estimate.get("median_merge_hours") or 0.0
+
+    return float(fallback), bucket, "repository-wide history"
 
 
 def build_active_pr_estimates(
     open_prs: list[dict[str, Any]],
-    history_estimate: dict[str, float | int | str],
+    history_estimate: dict[str, Any],
     now: datetime | None = None,
+    include_drafts: bool = True,
 ) -> list[dict[str, Any]]:
+    """Turn open pull requests into effort estimates and calendar forecasts.
+
+    Two different questions are answered per PR, because conflating them was the
+    core defect in the previous version (every field held the same number):
+
+    * ``review_effort_hours`` — how much *active reviewer time* the diff needs.
+    * ``estimated_total_merge_hours`` — how much *wall-clock time* a PR of this
+      size historically takes in this repository, and therefore how much is
+      likely left given the PR's current age.
+
+    ``estimated_remaining_hours`` now decreases as a PR ages and never drops
+    below the review effort still outstanding, so a PR open for 300 hours no
+    longer reports the same remaining time as one opened five minutes ago.
+    """
     now_utc = now or datetime.now(UTC)
+    thresholds = history_estimate.get("risk_thresholds") or {
+        "low_max": float(history_estimate.get("median_merge_hours") or 0.0),
+        "medium_max": float(history_estimate.get("p90_merge_hours") or 0.0),
+    }
 
     results: list[dict[str, Any]] = []
 
@@ -344,22 +509,34 @@ def build_active_pr_estimates(
         if not created:
             continue
 
-        created_utc = created.replace(tzinfo=UTC)
-        age_hours = max((now_utc - created_utc).total_seconds() / 3600.0, 0.0)
+        is_draft = bool(pr.get("draft"))
+        if is_draft and not include_drafts:
+            continue
+
+        age_hours = max((now_utc - created).total_seconds() / 3600.0, 0.0)
 
         additions = int(pr.get("additions") or 0)
         deletions = int(pr.get("deletions") or 0)
         changed_files = int(pr.get("changed_files") or 1)
         requested_reviewers = len(pr.get("requested_reviewers") or [])
-        is_draft = bool(pr.get("draft"))
         author = str((pr.get("user") or {}).get("login") or "unknown")
+        files = pr.get("files") or None
 
-        # --- Core estimate: active review effort ---
-        review_hours = _estimate_review_effort_hours(additions, deletions, changed_files)
+        split = classify_change(additions, deletions, files)
+        review_hours = estimate_review_effort_hours(additions, deletions, changed_files, files)
 
-        # Risk band based on review effort:
-        # low: <1h (quick review), medium: 1-4h (substantial), high: >4h (major effort)
-        risk = _review_effort_risk_band(review_hours)
+        # Size the PR by the part a human actually reads.
+        reviewable_lines = split["reviewable_additions"] + split["reviewable_deletions"]
+        baseline_hours, bucket, baseline_source = _baseline_for_size(reviewable_lines, history_estimate)
+
+        # A PR cannot merge faster than someone can review it.
+        projected_total = max(baseline_hours, review_hours)
+        remaining = max(projected_total - age_hours, 0.0)
+        # Past its baseline, what is left is the outstanding review work.
+        remaining = max(remaining, review_hours if age_hours >= projected_total else 0.0)
+
+        is_overdue = age_hours > projected_total
+        projected_merge_at = now_utc + timedelta(hours=remaining)
 
         results.append(
             {
@@ -367,31 +544,37 @@ def build_active_pr_estimates(
                 "title": str(pr.get("title") or "Untitled PR"),
                 "author": author,
                 "html_url": str(pr.get("html_url") or ""),
-                "created_at": created_utc.isoformat(),
+                "created_at": created.isoformat(),
                 "age_hours": round(age_hours, 2),
                 "additions": additions,
                 "deletions": deletions,
                 "changed_files": changed_files,
+                "reviewable_additions": split["reviewable_additions"],
+                "reviewable_deletions": split["reviewable_deletions"],
+                "generated_file_count": split["generated_file_count"],
                 "requested_reviewers": requested_reviewers,
                 "is_draft": is_draft,
+                # Active reviewer time.
                 "review_effort_hours": round(review_hours, 2),
-                # Keep these for API backward compat; both now reflect effort.
-                "historical_baseline_hours": round(review_hours, 2),
-                "complexity_multiplier": 1.0,
-                "estimated_total_merge_hours": round(review_hours, 2),
-                "estimated_remaining_hours": round(review_hours, 2),
-                "risk_band": risk,
+                "effort_band": effort_band(review_hours),
+                # Calendar-time forecast.
+                "size_bucket": bucket,
+                "baseline_merge_hours": round(baseline_hours, 2),
+                "baseline_source": baseline_source,
+                "estimated_total_merge_hours": round(projected_total, 2),
+                "estimated_remaining_hours": round(remaining, 2),
+                "is_overdue": is_overdue,
+                "overdue_by_hours": round(max(age_hours - projected_total, 0.0), 2),
+                "projected_merge_at": projected_merge_at.isoformat(),
+                "risk_band": _relative_risk_band(projected_total, thresholds),
             }
         )
 
-    results.sort(key=lambda item: item["review_effort_hours"], reverse=True)
+    # Most urgent first: overdue PRs, then the ones with least slack remaining.
+    results.sort(
+        key=lambda item: (
+            not item["is_overdue"],
+            -item["overdue_by_hours"] if item["is_overdue"] else item["estimated_remaining_hours"],
+        )
+    )
     return results
-
-
-def _review_effort_risk_band(hours: float) -> str:
-    """Risk based on how much active reviewer time is needed."""
-    if hours < 1.0:
-        return "low"
-    if hours <= 4.0:
-        return "medium"
-    return "high"

@@ -36,10 +36,16 @@ def test_bottleneck_insights_returns_defaults_with_insufficient_data() -> None:
 
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
+    assert len(data) == 5
     factors = [item["factor"] for item in data]
+    assert "time_to_first_review" in factors
     assert "reviewers_requested" in factors
     assert "reviewer_load_index" in factors
+    assert "change_size" in factors
+    assert "ci_pass_rate" in factors
+    # Verify category field is present
+    for item in data:
+        assert "category" in item
 
 
 def test_bottleneck_insights_uses_default_tenant() -> None:

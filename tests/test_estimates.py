@@ -29,8 +29,12 @@ def test_estimate_from_github_history_success() -> None:
         }
     ]
 
-    with patch("app.api.routes.estimates.fetch_closed_pr_history", return_value=mock_closed_prs), \
-         patch("app.api.routes.estimates.fetch_open_pull_requests", return_value=mock_open_prs):
+    # The fetchers now live in the shared orchestration service, which both the
+    # JSON API and the HTML page call.
+    with (
+        patch("app.services.estimation.fetch_closed_pr_history", return_value=mock_closed_prs),
+        patch("app.services.estimation.fetch_open_pull_requests", return_value=mock_open_prs),
+    ):
         client = TestClient(app)
         payload = {
             "owner": "org",
@@ -60,7 +64,7 @@ def test_estimate_github_history_error_handling() -> None:
     from app.services.github_history import GithubHistoryError
 
     with patch(
-        "app.api.routes.estimates.fetch_closed_pr_history",
+        "app.services.estimation.fetch_closed_pr_history",
         side_effect=GithubHistoryError("API rate limited"),
     ):
         client = TestClient(app)

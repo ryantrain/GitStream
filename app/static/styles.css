@@ -6,6 +6,7 @@
   --accent: #e45d3a;
   --accent-2: #126e66;
   --line: #dfd7c8;
+  --focus: #0b4f9c;
 }
 
 * {
@@ -23,8 +24,49 @@ body {
   min-height: 100vh;
 }
 
+/* Visible only to assistive tech. Used for table captions and band labels
+   that are conveyed visually by colour or shape. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 10000;
+  padding: 0.7rem 1rem;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 0 0 8px 0;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+/* A single visible focus treatment for every interactive control. Keyboard
+   users previously had no indication of where they were. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .shell {
-  max-width: 1160px;
+  max-width: 1360px;
   margin: 0 auto;
   padding: 2rem 1rem 4rem;
   animation: rise 400ms ease-out;
@@ -61,6 +103,8 @@ body {
   box-shadow: 0 8px 30px rgb(24 20 14 / 8%);
 }
 
+/* --- Form --- */
+
 .estimate-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -73,7 +117,25 @@ label {
   font-size: 0.9rem;
 }
 
-input {
+.field-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.checkbox-label {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.checkbox-label input {
+  width: auto;
+  margin: 0;
+}
+
+input,
+select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -81,10 +143,15 @@ input {
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.9rem;
   background: #fff;
+  color: var(--ink);
 }
 
-button {
+.submit-button {
   grid-column: 1 / -1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
   border: 0;
   border-radius: 999px;
   padding: 0.8rem 1rem;
@@ -97,9 +164,38 @@ button {
   transition: transform 120ms ease;
 }
 
-button:hover {
+.submit-button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
+
+.submit-button:disabled {
+  cursor: progress;
+  opacity: 0.8;
+}
+
+.spinner {
+  display: none;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgb(255 255 255 / 45%);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+.submit-button.is-loading .spinner {
+  display: inline-block;
+}
+
+.form-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  min-height: 1.2em;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* --- Messages --- */
 
 .alert {
   border-color: #f3ae99;
@@ -107,13 +203,45 @@ button:hover {
   color: #8a321d;
 }
 
-.metrics h2 {
+.alert p {
+  margin: 0.4rem 0 0;
+}
+
+.notice {
+  margin: 0.8rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid var(--accent-2);
+  background: #eef7f5;
+  border-radius: 0 8px 8px 0;
+  color: #123f3a;
+  font-size: 0.85rem;
+}
+
+.footnote {
+  margin: 1rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.footnote code {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+/* --- Metrics --- */
+
+.metrics-header h2 {
   margin: 0;
+}
+
+.provenance {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0.8rem;
   margin-top: 0.8rem;
 }
@@ -124,9 +252,24 @@ button:hover {
   padding: 0.9rem;
 }
 
+.grid article.highlight {
+  border-style: solid;
+  border-color: var(--accent-2);
+  background: #f2faf8;
+}
+
 .grid h3 {
   margin: 0;
   font-size: 0.95rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.grid p {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
   color: var(--muted);
 }
 
@@ -134,27 +277,53 @@ button:hover {
   margin: 0.2rem 0;
   font-size: 1.9rem;
   font-weight: 700;
+  color: var(--ink);
 }
+
+.muted-note {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.overdue-text {
+  color: #8a321d;
+  font-weight: 600;
+}
+
+/* --- Tooltip trigger --- */
 
 .tip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   width: 16px;
   height: 16px;
+  padding: 0;
   margin-left: 4px;
+  font-family: inherit;
   font-size: 0.65rem;
   font-weight: 700;
   color: var(--muted);
   background: var(--line);
+  border: 0;
   border-radius: 50%;
   cursor: help;
   vertical-align: middle;
   line-height: 1;
 }
 
+.tip:hover {
+  background: var(--accent-2);
+  color: #fff;
+}
+
 .floating-tooltip {
   position: fixed;
+  top: -9999px;
+  left: -9999px;
   background: var(--ink);
   color: #fff;
   font-size: 0.75rem;
@@ -162,33 +331,193 @@ button:hover {
   line-height: 1.4;
   white-space: normal;
   width: max-content;
-  max-width: 220px;
+  max-width: 260px;
   padding: 0.5rem 0.65rem;
   border-radius: 8px;
-  pointer-events: none;
   opacity: 0;
   transition: opacity 120ms ease;
   z-index: 9999;
+  /* Deliberately hoverable (not pointer-events: none) so the tooltip satisfies
+     WCAG 1.4.13, which requires hover content to remain reachable. */
 }
 
 .floating-tooltip.visible {
   opacity: 1;
 }
 
-.table-wrap {
+/* --- Size bucket disclosure --- */
+
+.buckets {
   margin-top: 1rem;
-  overflow-x: hidden;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 0.7rem 0.9rem;
+}
+
+.buckets summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.bucket-table {
+  font-size: 0.82rem;
+}
+
+.thin-note {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--line);
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+/* --- Toolbar --- */
+
+.table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.8rem;
+  margin-top: 1.2rem;
+}
+
+.filter-field {
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.filter-label {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.filter-field input,
+.filter-field select {
+  padding: 0.45rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.filter-field.checkbox-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.filter-field.checkbox-inline input {
+  width: auto;
+}
+
+/* --- Dropdown checkbox filter --- */
+
+.dropdown-check {
+  position: relative;
+}
+
+.dropdown-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  color: var(--ink);
+  cursor: pointer;
+  min-width: 140px;
+  white-space: nowrap;
+}
+
+.dropdown-toggle:hover {
+  border-color: var(--accent-2);
+}
+
+.dropdown-chevron {
+  margin-left: auto;
+  transition: transform 140ms ease;
+}
+
+.dropdown-toggle[aria-expanded="true"] .dropdown-chevron {
+  transform: rotate(180deg);
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100;
+  min-width: 100%;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.35rem 0;
+  box-shadow: 0 6px 20px rgb(24 20 14 / 12%);
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.dropdown-item:hover {
+  background: #f7f3ea;
+}
+
+.dropdown-item input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
+.risk.overdue {
+  background: #f3e8ff;
+  color: #5b21b6;
+}
+
+.row-count {
+  margin: 0 0 0 auto;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* --- Table --- */
+
+.table-wrap {
+  margin-top: 0.8rem;
+  /* Horizontal scrolling rather than clipping. With nine columns, `hidden`
+     made the rightmost data unreachable on narrow viewports. */
+  overflow-x: auto;
   overflow-y: visible;
   border: 1px solid var(--line);
   border-radius: 12px;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {
   width: 100%;
-  table-layout: fixed;
+  min-width: 940px;
   border-collapse: separate;
   border-spacing: 0;
   font-size: 0.82rem;
+}
+
+.bucket-table {
+  min-width: 0;
 }
 
 thead {
@@ -206,39 +535,49 @@ thead tr:first-child th:last-child {
 th,
 td {
   text-align: left;
-  padding: 0.45rem 0.4rem;
+  padding: 0.5rem 0.45rem;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
   white-space: normal;
   word-break: break-word;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 th.sortable {
-  user-select: none;
+  white-space: nowrap;
 }
 
-.sort-label {
+th.sortable > * {
+  vertical-align: middle;
+}
+
+/* Sorting is driven by a real button, so it is reachable by keyboard and its
+   state is announced through aria-sort on the header cell. */
+.sort-button {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
   cursor: pointer;
 }
 
-.sort-label:hover {
+.sort-button:hover {
   color: var(--accent);
 }
 
-.sort-label::before {
+.sort-button::before {
   content: "⇅ ";
   font-size: 0.7rem;
   opacity: 0.4;
 }
 
-th.sortable.asc .sort-label::before {
+th[aria-sort="ascending"] .sort-button::before {
   content: "↑ ";
   opacity: 1;
 }
 
-th.sortable.desc .sort-label::before {
+th[aria-sort="descending"] .sort-button::before {
   content: "↓ ";
   opacity: 1;
 }
@@ -247,12 +586,68 @@ tbody tr:nth-child(even) {
   background: #fff8ec;
 }
 
+tbody tr[hidden] {
+  display: none;
+}
+
 .pr-title {
+  max-width: 22ch;
   color: var(--muted);
   font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.forecast-note {
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.added {
+  color: #0f554e;
+}
+
+.removed {
+  color: #8a321d;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge.draft {
+  background: #e8e4d8;
+  color: #4a463d;
+}
+
+.band-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 0.25rem;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+.band-dot.low {
+  background: #0f554e;
+}
+
+.band-dot.medium {
+  background: #b07d00;
+}
+
+.band-dot.high {
+  background: #8a321d;
 }
 
 .risk {
@@ -264,6 +659,9 @@ tbody tr:nth-child(even) {
   letter-spacing: 0.05em;
 }
 
+/* Contrast ratios here clear WCAG AA (4.5:1) against their own backgrounds, so
+   the band is legible without relying on hue alone — the text label carries the
+   same information. */
 .risk.low {
   background: #e3f3ef;
   color: #0f554e;
@@ -271,7 +669,7 @@ tbody tr:nth-child(even) {
 
 .risk.medium {
   background: #fff0d5;
-  color: #7f5a00;
+  color: #6b4c00;
 }
 
 .risk.high {
@@ -290,13 +688,52 @@ tbody tr:nth-child(even) {
   }
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 780px) {
-  .estimate-form,
-  .grid {
+  .estimate-form {
     grid-template-columns: 1fr;
   }
 
   .shell {
     padding-top: 1.5rem;
+  }
+
+  .table-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .row-count {
+    margin-left: 0;
+  }
+}
+
+/* Respect a reduced-motion preference: drop the entrance animation, the button
+   lift and the spinner rotation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .shell {
+    animation: none;
+  }
+
+  .submit-button:hover:not(:disabled) {
+    transform: none;
+  }
+
+  .spinner {
+    animation: none;
+    border-top-color: rgb(255 255 255 / 45%);
   }
 }

@@ -6,13 +6,8 @@ from app.schemas.estimates import (
     GithubHistoryEstimateRequest,
     GithubHistoryEstimateResponse,
 )
-from app.services.github_history import (
-    GithubHistoryError,
-    build_active_pr_estimates,
-    estimate_from_pr_history,
-    fetch_closed_pr_history,
-    fetch_open_pull_requests,
-)
+from app.services.estimation import run_repository_estimate
+from app.services.github_client import GithubHistoryError
 
 router = APIRouter()
 
@@ -28,27 +23,14 @@ def estimate_from_github_history(
     _ = tenant
 
     try:
-        token = payload.github_token or settings.github_token
-        prs = fetch_closed_pr_history(
+        result = run_repository_estimate(
             owner=payload.owner,
             repository=payload.repository,
             lookback_prs=payload.lookback_prs,
-            github_token=token,
+            github_token=payload.github_token or settings.github_token,
+            include_drafts=payload.include_drafts,
         )
-        history_estimate = estimate_from_pr_history(prs)
-        open_prs = fetch_open_pull_requests(
-            owner=payload.owner,
-            repository=payload.repository,
-            github_token=token,
-        )
-        active_estimates = build_active_pr_estimates(open_prs, history_estimate)
     except GithubHistoryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return GithubHistoryEstimateResponse(
-        owner=payload.owner,
-        repository=payload.repository,
-        **history_estimate,
-        active_pr_count=len(active_estimates),
-        active_pull_requests=active_estimates,
-    )
+    return GithubHistoryEstimateResponse(**result)

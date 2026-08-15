@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Response
 from prometheus_client import (
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
     CONTENT_TYPE_LATEST,
@@ -24,16 +25,40 @@ PREDICTION_LATENCY = Histogram(
     buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5],
 )
 
+PREDICTION_CONFIDENCE = Histogram(
+    "gitstream_prediction_confidence",
+    "Distribution of prediction confidence scores",
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+)
+
 INGESTION_EVENTS_TOTAL = Counter(
     "gitstream_ingestion_events_total",
     "Total PR events ingested",
-    ["tenant_id"],
+    ["tenant_id", "event_type"],
 )
 
 INGESTION_ERRORS_TOTAL = Counter(
     "gitstream_ingestion_errors_total",
     "Total ingestion errors",
     ["tenant_id", "error_type"],
+)
+
+MERGE_EVENTS_TOTAL = Counter(
+    "gitstream_merge_events_total",
+    "Total merge events processed (observed_merge_hours backfilled)",
+    ["tenant_id"],
+)
+
+REVIEW_CYCLES_TOTAL = Counter(
+    "gitstream_review_cycles_total",
+    "Total review cycle events ingested",
+    ["tenant_id", "review_state"],
+)
+
+QUEUE_DEPTH = Gauge(
+    "gitstream_queue_depth",
+    "Current open PR queue depth",
+    ["tenant_id"],
 )
 
 HTTP_REQUESTS_TOTAL = Counter(
